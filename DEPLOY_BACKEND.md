@@ -24,6 +24,10 @@ Follow these steps to deploy your Flask backend so your mobile app works!
 
 **Build & Deploy:**
 - **Environment:** `Python 3`
+- **Build Command:** `pip install -r requirements.txt && curl -fsSL https://nodejs.org/dist/v20.11.0/node-v20.11.0-linux-x64.tar.xz -o /tmp/node.tar.xz && cd /tmp && tar -xf node.tar.xz && export PATH=$PATH:/tmp/node-v20.11.0-linux-x64/bin && node --version`
+- **Start Command:** `export PATH=$PATH:/tmp/node-v20.11.0-linux-x64/bin:$PATH && gunicorn app:app --bind 0.0.0.0:$PORT --timeout 600 --workers 2`
+
+**⚠️ Alternative (Simpler):** If Node.js installation fails, the app will work but may skip some videos:
 - **Build Command:** `pip install -r requirements.txt`
 - **Start Command:** `gunicorn app:app --bind 0.0.0.0:$PORT --timeout 600 --workers 2`
 

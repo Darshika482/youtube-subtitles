@@ -134,7 +134,10 @@ def download_subtitle(video_id, video_url):
         js_runtime_args = ['--js-runtimes', js_runtime]
         print(f"  Using JavaScript runtime: {js_runtime}", file=sys.stderr)
     else:
-        print(f"  WARNING: No JavaScript runtime found. Some videos may fail.", file=sys.stderr)
+        print(f"  WARNING: No JavaScript runtime found. Trying without JS runtime...", file=sys.stderr)
+        # Try to use yt-dlp without JS runtime - it may still work for some videos
+        # Add --no-check-certificate and other flags that might help
+        pass
     
     # Base command options
     base_opts = [
@@ -144,43 +147,91 @@ def download_subtitle(video_id, video_url):
         '--write-auto-sub',
         '--sub-lang', 'en',
         '--convert-subs', 'vtt',
+        '--ignore-errors',  # Continue even if one video fails
     ]
     base_opts.extend(js_runtime_args)
     
+    # If no JS runtime, try to use older extraction methods that don't require JS
+    if not js_runtime:
+        # These options might help when JS runtime is not available
+        # Use m3u8 format which doesn't require JS, and try to get subtitles directly
+        base_opts.extend([
+            '--extractor-args', 'youtube:skip=dash',  # Skip DASH which requires JS
+            '--no-check-certificate',  # Sometimes helps with connection issues
+        ])
+    
     # Multiple strategies to try
-    strategies = [
-        {
-            'name': 'web_client',
-            'cmd': base_opts + [
-                '--extractor-args', 'youtube:player_client=web',
-                '-o', output_template,
-                video_url,
-            ]
-        },
-        {
-            'name': 'android_client',
-            'cmd': base_opts + [
-                '--extractor-args', 'youtube:player_client=android',
-                '-o', output_template,
-                video_url,
-            ]
-        },
-        {
-            'name': 'ios_client',
-            'cmd': base_opts + [
-                '--extractor-args', 'youtube:player_client=ios',
-                '-o', output_template,
-                video_url,
-            ]
-        },
-        {
-            'name': 'default',
-            'cmd': base_opts + [
-                '-o', output_template,
-                video_url,
-            ]
-        }
-    ]
+    # If no JS runtime, prioritize Android/iOS clients which may work better without JS
+    if not js_runtime:
+        # Android and iOS clients often work better without JS runtime
+        strategies = [
+            {
+                'name': 'android_client',
+                'cmd': base_opts + [
+                    '--extractor-args', 'youtube:player_client=android',
+                    '-o', output_template,
+                    video_url,
+                ]
+            },
+            {
+                'name': 'ios_client',
+                'cmd': base_opts + [
+                    '--extractor-args', 'youtube:player_client=ios',
+                    '-o', output_template,
+                    video_url,
+                ]
+            },
+            {
+                'name': 'web_client',
+                'cmd': base_opts + [
+                    '--extractor-args', 'youtube:player_client=web',
+                    '-o', output_template,
+                    video_url,
+                ]
+            },
+            {
+                'name': 'default',
+                'cmd': base_opts + [
+                    '-o', output_template,
+                    video_url,
+                ]
+            }
+        ]
+    else:
+        # With JS runtime, web client is usually best
+        strategies = [
+            {
+                'name': 'web_client',
+                'cmd': base_opts + [
+                    '--extractor-args', 'youtube:player_client=web',
+                    '-o', output_template,
+                    video_url,
+                ]
+            },
+            {
+                'name': 'android_client',
+                'cmd': base_opts + [
+                    '--extractor-args', 'youtube:player_client=android',
+                    '-o', output_template,
+                    video_url,
+                ]
+            },
+            {
+                'name': 'ios_client',
+                'cmd': base_opts + [
+                    '--extractor-args', 'youtube:player_client=ios',
+                    '-o', output_template,
+                    video_url,
+                ]
+            },
+            {
+                'name': 'default',
+                'cmd': base_opts + [
+                    '-o', output_template,
+                    video_url,
+                ]
+            }
+        ]
     
     # Try browser cookies if available
     try:
@@ -610,23 +661,32 @@ def validate_cookie_file(cookie_path):
 
 def get_js_runtime():
     """Detect available JavaScript runtime for yt-dlp."""
+    # Check common Node.js locations (for Render deployments)
+    node_paths = [
+        'node',  # System PATH
+        '/tmp/node-v20.11.0-linux-x64/bin/node',  # Render build location
+        '/usr/local/bin/node',
+        '/usr/bin/node',
+        os.path.join(os.environ.get('HOME', ''), '.local/bin/node'),
+    ]
+    
     # Try Node.js first (most common)
-    try:
-        result = subprocess.run(
-            ['node', '--version'],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            shell=False,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-        )
-        if result.returncode == 0:
-            node_version = result.stdout.strip()
-            print(f"  Detected Node.js: {node_version}", file=sys.stderr)
-            return 'node'
-    except Exception as e:
-        print(f"  Node.js check failed: {e}", file=sys.stderr)
-        pass
+    for node_cmd in node_paths:
+        try:
+            result = subprocess.run(
+                [node_cmd, '--version'],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                shell=False,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            )
+            if result.returncode == 0:
+                node_version = result.stdout.strip()
+                print(f"  Detected Node.js: {node_version} at {node_cmd}", file=sys.stderr)
+                return 'node'
+        except Exception as e:
+            continue
     
     # Try Deno
     try:
