@@ -1,13 +1,52 @@
 'use client'
 
-import { useState } from 'react'
-import { extractTranscripts, getDownloadUrl, ExtractResponse } from '@/lib/api'
+import { useState, useEffect, useRef } from 'react'
+import { extractTranscripts, getDownloadUrl, ExtractResponse, ProgressUpdate } from '@/lib/api'
 
 export default function TranscriptExtractor() {
   const [playlistUrl, setPlaylistUrl] = useState('')
   const [loading, setLoading] = useState(false)
   const [results, setResults] = useState<ExtractResponse | null>(null)
   const [error, setError] = useState('')
+  const [progress, setProgress] = useState<ProgressUpdate | null>(null)
+  const [elapsedTime, setElapsedTime] = useState(0)
+  const timerIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const startTimeRef = useRef<number | null>(null)
+
+  // Timer effect
+  useEffect(() => {
+    if (loading && startTimeRef.current) {
+      timerIntervalRef.current = setInterval(() => {
+        if (startTimeRef.current) {
+          const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000)
+          setElapsedTime(elapsed)
+        }
+      }, 1000)
+    } else {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current)
+        timerIntervalRef.current = null
+      }
+      if (!loading) {
+        startTimeRef.current = null
+      }
+    }
+
+    return () => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current)
+      }
+    }
+  }, [loading])
+
+  const formatTime = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    if (mins > 0) {
+      return `${mins}m ${secs}s`
+    }
+    return `${secs}s`
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -19,15 +58,24 @@ export default function TranscriptExtractor() {
 
     setError('')
     setResults(null)
+    setProgress(null)
     setLoading(true)
+    setElapsedTime(0)
+    startTimeRef.current = Date.now()
 
     try {
-      const data = await extractTranscripts(playlistUrl)
+      const data = await extractTranscripts(playlistUrl, (progressUpdate: ProgressUpdate) => {
+        setProgress(progressUpdate)
+      })
       setResults(data)
     } catch (err: any) {
       setError(err.message || 'Failed to extract transcripts.')
     } finally {
       setLoading(false)
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current)
+        timerIntervalRef.current = null
+      }
     }
   }
 
@@ -64,15 +112,64 @@ export default function TranscriptExtractor() {
       {/* Loading State */}
       {loading && (
         <div className="progress-container fade-in" style={{ marginTop: 20 }}>
-          <div className="progress-header">
-            <span className="progress-label">Processing playlist…</span>
+          <div className="progress-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <span className="progress-label" style={{ fontSize: '1rem', fontWeight: 600 }}>
+              {progress?.video_title ? (
+                <span>
+                  <span style={{ color: '#a78bfa' }}>▶</span> {progress.video_title}
+                </span>
+              ) : (
+                'Processing playlist…'
+              )}
+            </span>
+            <span style={{ 
+              fontSize: '0.85rem', 
+              color: '#c4b5fd', 
+              fontWeight: 600,
+              background: 'rgba(167, 139, 250, 0.1)',
+              padding: '4px 10px',
+              borderRadius: '12px'
+            }}>
+              ⏱️ {formatTime(elapsedTime)}
+            </span>
           </div>
-          <div className="progress-track">
-            <div className="progress-fill" style={{ width: '60%' }} />
+          <div className="progress-track" style={{ marginBottom: 10 }}>
+            <div 
+              className="progress-fill" 
+              style={{ 
+                width: progress?.percentage ? `${Math.max(progress.percentage, 2)}%` : '2%',
+                transition: 'width 0.5s ease-out'
+              }} 
+            />
           </div>
-          <p className="progress-status">
-            Downloading and extracting captions from each video. This may take a few minutes for large playlists.
-          </p>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+            <div style={{ flex: 1, minWidth: 200 }}>
+              <p className="progress-status" style={{ margin: 0, fontSize: '0.9rem' }}>
+                {progress?.status || 'Starting...'}
+              </p>
+              {progress?.current !== undefined && progress?.total !== undefined && (
+                <p style={{ 
+                  margin: '4px 0 0 0', 
+                  fontSize: '0.85rem', 
+                  color: '#a78bfa', 
+                  fontWeight: 600 
+                }}>
+                  📊 Progress: {progress.current} of {progress.total} videos processed
+                </p>
+              )}
+            </div>
+            {progress?.percentage !== undefined && (
+              <span style={{ 
+                fontSize: '1.1rem', 
+                color: '#a78bfa', 
+                fontWeight: 700,
+                minWidth: '50px',
+                textAlign: 'right'
+              }}>
+                {progress.percentage}%
+              </span>
+            )}
+          </div>
         </div>
       )}
 
