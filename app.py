@@ -127,63 +127,55 @@ def download_subtitle(video_id, video_url):
     os.makedirs(temp_dir, exist_ok=True)
     output_template = os.path.join(temp_dir, f'{video_id}.%(ext)s')
     
+    # Get JavaScript runtime if available
+    js_runtime = get_js_runtime()
+    js_runtime_args = []
+    if js_runtime:
+        js_runtime_args = ['--js-runtimes', js_runtime]
+        print(f"  Using JavaScript runtime: {js_runtime}", file=sys.stderr)
+    else:
+        print(f"  WARNING: No JavaScript runtime found. Some videos may fail.", file=sys.stderr)
+    
+    # Base command options
+    base_opts = [
+        'yt-dlp',
+        '--skip-download',
+        '--write-sub',
+        '--write-auto-sub',
+        '--sub-lang', 'en',
+        '--convert-subs', 'vtt',
+    ]
+    base_opts.extend(js_runtime_args)
+    
     # Multiple strategies to try
     strategies = [
         {
             'name': 'web_client',
-            'cmd': [
-                'yt-dlp',
-                '--skip-download',
-                '--write-sub',
-                '--write-auto-sub',
-                '--sub-lang', 'en',
-                '--convert-subs', 'vtt',
+            'cmd': base_opts + [
                 '--extractor-args', 'youtube:player_client=web',
-                '--no-warnings',
                 '-o', output_template,
                 video_url,
             ]
         },
         {
             'name': 'android_client',
-            'cmd': [
-                'yt-dlp',
-                '--skip-download',
-                '--write-sub',
-                '--write-auto-sub',
-                '--sub-lang', 'en',
-                '--convert-subs', 'vtt',
+            'cmd': base_opts + [
                 '--extractor-args', 'youtube:player_client=android',
-                '--no-warnings',
                 '-o', output_template,
                 video_url,
             ]
         },
         {
             'name': 'ios_client',
-            'cmd': [
-                'yt-dlp',
-                '--skip-download',
-                '--write-sub',
-                '--write-auto-sub',
-                '--sub-lang', 'en',
-                '--convert-subs', 'vtt',
+            'cmd': base_opts + [
                 '--extractor-args', 'youtube:player_client=ios',
-                '--no-warnings',
                 '-o', output_template,
                 video_url,
             ]
         },
         {
             'name': 'default',
-            'cmd': [
-                'yt-dlp',
-                '--skip-download',
-                '--write-sub',
-                '--write-auto-sub',
-                '--sub-lang', 'en',
-                '--convert-subs', 'vtt',
-                '--no-warnings',
+            'cmd': base_opts + [
                 '-o', output_template,
                 video_url,
             ]
@@ -194,21 +186,15 @@ def download_subtitle(video_id, video_url):
     try:
         available_browsers = get_browser_cookies()
         for browser in available_browsers[:2]:  # Limit to 2 browsers
+            browser_cmd = base_opts + [
+                '--cookies-from-browser', browser,
+                '--extractor-args', 'youtube:player_client=web',
+                '-o', output_template,
+                video_url,
+            ]
             strategies.insert(0, {
                 'name': f'browser_{browser}',
-                'cmd': [
-                    'yt-dlp',
-                    '--skip-download',
-                    '--write-sub',
-                    '--write-auto-sub',
-                    '--sub-lang', 'en',
-                    '--convert-subs', 'vtt',
-                    '--cookies-from-browser', browser,
-                    '--extractor-args', 'youtube:player_client=web',
-                    '--no-warnings',
-                    '-o', output_template,
-                    video_url,
-                ]
+                'cmd': browser_cmd
             })
     except:
         pass  # Continue without browser cookies
@@ -259,17 +245,31 @@ def download_subtitle(video_id, video_url):
                     print(f"  ✓ Found subtitle: {file_name} ({file_size} bytes)", file=sys.stderr)
                     return best_file, None
 
+            # Get full error output for debugging
+            error_output = (result.stderr or '') + (result.stdout or '')
+            
+            # Log full error for debugging (show more details)
+            if error_output:
+                # Show first 800 chars to see full error messages
+                error_preview = error_output[:800].replace('\n', ' | ')
+                print(f"  Full output: {error_preview}", file=sys.stderr)
+            
             # If command failed, log error
             if result.returncode != 0:
-                error_output = (result.stderr or '') + (result.stdout or '')
                 error_lower = error_output.lower()
                 
-                # Check for specific error types
-                if 'no subtitles' in error_lower or 'subtitles are not available' in error_lower or 'has no subtitles' in error_lower:
-                    last_error = "No subtitles available for this video"
-                    print(f"  ✗ {strategy['name']}: No subtitles available", file=sys.stderr)
+                # Check for specific error types - look for full error messages
+                if 'no subtitles' in error_lower or 'subtitles are not available' in error_lower or 'has no subtitles' in error_lower or 'no subtitles available' in error_lower:
+                    # Extract the actual error message
+                    error_lines = error_output.split('\n')
+                    subtitle_error = next((line for line in error_lines if 'subtitle' in line.lower() or 'caption' in line.lower()), None)
+                    if subtitle_error:
+                        last_error = subtitle_error.strip()[:200]
+                    else:
+                        last_error = "No subtitles available for this video"
+                    print(f"  ✗ {strategy['name']}: {last_error}", file=sys.stderr)
                     break  # No point trying other strategies
-                elif 'private' in error_lower or 'unavailable' in error_lower or 'video unavailable' in error_lower:
+                elif 'private' in error_lower or 'unavailable' in error_lower or 'video unavailable' in error_lower or 'unavailable' in error_lower:
                     last_error = "Video is private or unavailable"
                     print(f"  ✗ {strategy['name']}: Video unavailable", file=sys.stderr)
                     break  # No point trying other strategies
@@ -277,23 +277,29 @@ def download_subtitle(video_id, video_url):
                     last_error = "Video requires sign-in or membership"
                     print(f"  ✗ {strategy['name']}: Requires authentication", file=sys.stderr)
                     continue  # Try browser cookies if available
-                elif 'rate limit' in error_lower or '429' in error_output:
+                elif 'rate limit' in error_lower or '429' in error_output or 'too many requests' in error_lower:
                     last_error = "Rate limited by YouTube, please wait"
                     print(f"  ✗ {strategy['name']}: Rate limited", file=sys.stderr)
                     time.sleep(2)  # Wait a bit before next strategy
                     continue
                 else:
-                    # Try next strategy
-                    error_msg = error_output[:200] if error_output else "Unknown error"
+                    # Try next strategy - extract meaningful error
+                    error_lines = error_output.split('\n')
+                    # Look for ERROR or WARNING lines
+                    error_line = next((line for line in error_lines if 'ERROR' in line or 'error' in line.lower()), None)
+                    if error_line:
+                        error_msg = error_line.strip()[:200]
+                    else:
+                        error_msg = error_output[:200] if error_output else "Unknown error"
                     print(f"  ✗ {strategy['name']} failed: {error_msg}", file=sys.stderr)
                     if not last_error or ('no subtitles' not in last_error.lower() and 'unavailable' not in last_error.lower()):
-                        last_error = f"Error: {error_msg[:100]}"
+                        last_error = error_msg
                     continue
             else:
                 # Command succeeded but no file found - might be rate limited or truly no subtitles
-                error_output = (result.stderr or '') + (result.stdout or '')
-                if 'no subtitles' in error_output.lower() or 'subtitles are not available' in error_output.lower():
+                if 'no subtitles' in error_output.lower() or 'subtitles are not available' in error_output.lower() or 'has no subtitles' in error_output.lower():
                     last_error = "No subtitles available for this video"
+                    print(f"  ✗ {strategy['name']}: No subtitles available", file=sys.stderr)
                     break  # No point trying other strategies
                 else:
                     # Command succeeded but no file - might be a timing issue, try next strategy
@@ -601,6 +607,43 @@ def validate_cookie_file(cookie_path):
     except Exception as e:
         return False, f"Error reading cookie file: {str(e)}"
 
+
+def get_js_runtime():
+    """Detect available JavaScript runtime for yt-dlp."""
+    # Try Node.js first (most common)
+    try:
+        result = subprocess.run(
+            ['node', '--version'],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            shell=False,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        )
+        if result.returncode == 0:
+            node_version = result.stdout.strip()
+            print(f"  Detected Node.js: {node_version}", file=sys.stderr)
+            return 'node'
+    except Exception as e:
+        print(f"  Node.js check failed: {e}", file=sys.stderr)
+        pass
+    
+    # Try Deno
+    try:
+        result = subprocess.run(
+            ['deno', '--version'],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            shell=False,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        )
+        if result.returncode == 0:
+            return 'deno'
+    except:
+        pass
+    
+    return None
 
 def get_browser_cookies():
     """Try to find browser cookies automatically."""
