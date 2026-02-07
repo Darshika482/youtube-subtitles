@@ -231,11 +231,11 @@ def get_playlist_videos_api(playlist_id):
 
 
 def get_playlist_videos(playlist_url):
-    """Get playlist videos – tries API-based method first, falls back to yt-dlp."""
+    """Get playlist videos – uses web scraping (no yt-dlp needed for transcripts)."""
     # Extract playlist ID
     playlist_id = extract_playlist_id(playlist_url)
     
-    # If it's a single video, return it directly
+    # If it's a single video, return it directly (NEVER use yt-dlp for single videos)
     if is_single_video_url(playlist_url):
         video_id = extract_video_id(playlist_url)
         if video_id:
@@ -259,61 +259,20 @@ def get_playlist_videos(playlist_url):
                 'title': title,
                 'url': f'https://www.youtube.com/watch?v={video_id}'
             }], None
+        else:
+            return None, "Could not extract video ID from URL"
     
-    # Method 1: Parse playlist page directly (no yt-dlp, works from servers)
+    # For playlists: Use web scraping (no yt-dlp needed)
     if playlist_id:
         print(f"  Fetching playlist {playlist_id} via web scraping...", file=sys.stderr)
         videos, error = get_playlist_videos_api(playlist_id)
         if videos:
             print(f"  Found {len(videos)} videos via web scraping", file=sys.stderr)
             return videos, None
-        print(f"  Web scraping failed: {error}", file=sys.stderr)
+        return None, f"Could not fetch playlist: {error}"
     
-    # Method 2: Fall back to yt-dlp (works locally, may fail on servers)
-    try:
-        print(f"  Falling back to yt-dlp for playlist...", file=sys.stderr)
-        cmd = [
-            'yt-dlp',
-            '--flat-playlist',
-            '--dump-json',
-            '--no-warnings',
-            '--playlist-end', '50',
-            playlist_url
-        ]
-        
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            shell=False,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-        )
-        
-        if result.returncode != 0:
-            error_msg = result.stderr or result.stdout or 'Unknown error'
-            return None, f"Could not fetch playlist. {error_msg[:300]}"
-        
-        videos = []
-        for line in result.stdout.strip().split('\n'):
-            if line.strip():
-                try:
-                    data = json.loads(line)
-                    videos.append({
-                        'id': data.get('id', ''),
-                        'title': data.get('title', 'Unknown Title'),
-                        'url': f"https://www.youtube.com/watch?v={data.get('id', '')}"
-                    })
-                except json.JSONDecodeError:
-                    continue
-        
-        if videos:
-            return videos, None
-        return None, "No videos found in playlist"
-    except subprocess.TimeoutExpired:
-        return None, "Request timed out"
-    except Exception as e:
-        return None, f"Error: {str(e)}"
+    # If no playlist ID and not a single video, it's an invalid URL
+    return None, "Invalid YouTube URL. Please provide a playlist URL or single video URL."
 
 
 def download_subtitle(video_id, video_url):
