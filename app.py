@@ -6,10 +6,14 @@ import shutil
 import sys
 import traceback
 import threading
+import requests as http_requests  # renamed to avoid conflict with flask.request
 from flask import Flask, render_template, request, jsonify, send_file, Response, stream_with_context
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import subprocess
+
+# youtube-transcript-api – works from servers without Node.js or bot detection
+from youtube_transcript_api import YouTubeTranscriptApi
 
 app = Flask(__name__)
 # Enable CORS so a separate frontend (e.g. Vercel) can call this API.
@@ -33,58 +37,247 @@ progress_lock = threading.Lock()
 
 
 def extract_spoken_words_only(vtt_file):
-    """Extract and clean spoken words from VTT subtitle file."""
+    """Extract and clean spoken words from VTT subtitle file (legacy fallback)."""
     try:
         with open(vtt_file, 'r', encoding='utf-8') as f:
             content = f.read()
     except Exception as e:
         return f"[Error reading file: {str(e)}]"
     
-    # Remove <c> tags (coloring/styling tags)
     text = re.sub(r'<c[^>]*>|</c>', '', content)
-    
-    # Remove WEBVTT header, cue numbers, and timestamps
     text = re.sub(r'WEBVTT\s*', '', text, flags=re.IGNORECASE)
     text = re.sub(r'^\d+\s*$', '', text, flags=re.MULTILINE)
-    # Remove timestamps (handles both comma and dot formats)
     text = re.sub(r'\d{1,2}:\d{2}:\d{2}[\.,]\d{3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[\.,]\d{3}.*?\n', '', text, flags=re.MULTILINE)
-    # Also handle shorter timestamp format (MM:SS)
     text = re.sub(r'\d{1,2}:\d{2}[\.,]\d{3}\s*-->\s*\d{1,2}:\d{2}[\.,]\d{3}.*?\n', '', text, flags=re.MULTILINE)
-    
-    # Remove audio cues like [Music], [Applause], [Silence], [Sound]
     text = re.sub(r'\[(?:Music|Applause|Silence|Sound|Laughter|Crowd).*?\]', '', text, flags=re.IGNORECASE)
-    
-    # Remove speaker labels (e.g., "Speaker 1:", ">>")
     text = re.sub(r'^[A-Z][a-z]+(?:\s+\d+)?:\s*', '', text, flags=re.MULTILINE)
     text = re.sub(r'^>>\s*', '', text, flags=re.MULTILINE)
-    
-    # Remove HTML entities and tags
     text = re.sub(r'&[a-z]+;', '', text, flags=re.IGNORECASE)
     text = re.sub(r'<[^>]+>', '', text)
-    
-    # Clean up whitespace
     text = re.sub(r'^\s+|\s+$', '', text, flags=re.MULTILINE)
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r' +', ' ', text)
-    
-    # Join lines into natural flow
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     text = ' '.join(lines)
-    
-    # Final cleanup
     text = text.strip()
-    
     return text if len(text) > 50 else "[No clear speech detected]"
 
 
-def get_playlist_videos(playlist_url):
-    """Get list of video IDs and titles from playlist using yt-dlp."""
+# ─── New helpers: no yt-dlp needed for transcripts ───
+
+def extract_video_id(url):
+    """Extract YouTube video ID from various URL formats."""
+    patterns = [
+        r'(?:v=|/v/|youtu\.be/)([a-zA-Z0-9_-]{11})',
+        r'(?:embed/)([a-zA-Z0-9_-]{11})',
+        r'(?:shorts/)([a-zA-Z0-9_-]{11})',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
+def extract_playlist_id(url):
+    """Extract YouTube playlist ID from URL."""
+    match = re.search(r'[?&]list=([a-zA-Z0-9_-]+)', url)
+    return match.group(1) if match else None
+
+
+def is_single_video_url(url):
+    """Check if URL is a single video (not a playlist)."""
+    has_video = bool(re.search(r'(?:v=|youtu\.be/|shorts/)', url))
+    has_playlist = bool(re.search(r'[?&]list=', url))
+    return has_video and not has_playlist
+
+
+def get_transcript_direct(video_id):
+    """Get transcript using youtube-transcript-api v1.2+ (no yt-dlp, no Node.js, no bot detection)."""
     try:
+        ytt_api = YouTubeTranscriptApi()
+        transcript_list = ytt_api.list(video_id)
+        
+        transcript = None
+        
+        # 1. Try English transcript (manual or auto-generated)
+        try:
+            transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
+        except Exception:
+            pass
+        
+        # 2. Try any available transcript and translate to English
+        if not transcript:
+            try:
+                for t in transcript_list:
+                    if t.is_translatable:
+                        transcript = t.translate('en')
+                        break
+            except Exception:
+                pass
+        
+        # 3. Last resort: just use whatever is available
+        if not transcript:
+            try:
+                for t in transcript_list:
+                    transcript = t
+                    break
+            except Exception:
+                pass
+        
+        if not transcript:
+            return None, "No transcript available"
+        
+        # Fetch the actual transcript data
+        fetched = transcript.fetch()
+        
+        # Clean and combine text – v1.2+ uses .snippets with .text attribute
+        texts = []
+        for snippet in fetched.snippets:
+            text = snippet.text if hasattr(snippet, 'text') else str(snippet)
+            text = re.sub(r'\[.*?\]', '', text)  # Remove [Music], [Applause] etc.
+            text = re.sub(r'<[^>]+>', '', text)   # Remove HTML tags
+            text = re.sub(r'^captions?\s*\w*\s*', '', text, flags=re.IGNORECASE)  # Remove "captions en" prefix
+            text = text.strip()
+            if text and text not in texts[-1:]:    # Avoid consecutive duplicates
+                texts.append(text)
+        
+        combined = ' '.join(texts)
+        combined = re.sub(r' +', ' ', combined).strip()
+        
+        if len(combined) < 50:
+            return None, "Transcript too short or empty"
+        
+        return combined, None
+        
+    except Exception as e:
+        error_str = str(e).lower()
+        if 'disabled' in error_str:
+            return None, "Subtitles are disabled for this video"
+        elif 'no transcript' in error_str or 'not translatable' in error_str:
+            return None, "No transcript available for this video"
+        elif 'no longer available' in error_str or 'video unavailable' in error_str:
+            return None, "Video is unavailable or no longer exists"
+        elif 'too many requests' in error_str or '429' in error_str:
+            return None, "Rate limited by YouTube - please wait"
+        else:
+            return None, f"Could not fetch transcript: {str(e)[:150]}"
+
+
+def get_playlist_videos_api(playlist_id):
+    """Fetch playlist videos by parsing YouTube's playlist page (no yt-dlp needed)."""
+    try:
+        url = f"https://www.youtube.com/playlist?list={playlist_id}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                          '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        
+        resp = http_requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        html = resp.text
+        
+        # Extract ytInitialData JSON from the page
+        match = re.search(r'var\s+ytInitialData\s*=\s*(\{.*?\});\s*</script>', html, re.DOTALL)
+        if not match:
+            match = re.search(r'window\["ytInitialData"\]\s*=\s*(\{.*?\});\s*</script>', html, re.DOTALL)
+        
+        if not match:
+            return None, "Could not parse playlist page"
+        
+        try:
+            data = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return None, "Could not parse playlist data"
+        
+        videos = []
+        try:
+            tabs = data['contents']['twoColumnBrowseResultsRenderer']['tabs']
+            for tab in tabs:
+                tab_content = tab.get('tabRenderer', {}).get('content', {})
+                section_list = tab_content.get('sectionListRenderer', {}).get('contents', [])
+                for section in section_list:
+                    item_section = section.get('itemSectionRenderer', {}).get('contents', [])
+                    for item in item_section:
+                        playlist_renderer = item.get('playlistVideoListRenderer', {})
+                        video_contents = playlist_renderer.get('contents', [])
+                        for vc in video_contents:
+                            vr = vc.get('playlistVideoRenderer', {})
+                            if vr:
+                                vid_id = vr.get('videoId', '')
+                                title_runs = vr.get('title', {}).get('runs', [])
+                                title = title_runs[0].get('text', 'Unknown') if title_runs else 'Unknown'
+                                if vid_id:
+                                    videos.append({
+                                        'id': vid_id,
+                                        'title': title,
+                                        'url': f'https://www.youtube.com/watch?v={vid_id}'
+                                    })
+        except (KeyError, IndexError, TypeError) as e:
+            print(f"  Error navigating playlist JSON: {e}", file=sys.stderr)
+        
+        videos = videos[:50]
+        
+        if videos:
+            return videos, None
+        
+        return None, "No videos found in playlist (playlist may be private or empty)"
+        
+    except http_requests.exceptions.RequestException as e:
+        return None, f"Failed to fetch playlist page: {str(e)[:150]}"
+    except Exception as e:
+        return None, f"Error parsing playlist: {str(e)[:150]}"
+
+
+def get_playlist_videos(playlist_url):
+    """Get playlist videos – tries API-based method first, falls back to yt-dlp."""
+    # Extract playlist ID
+    playlist_id = extract_playlist_id(playlist_url)
+    
+    # If it's a single video, return it directly
+    if is_single_video_url(playlist_url):
+        video_id = extract_video_id(playlist_url)
+        if video_id:
+            # Try to get the actual video title from the page
+            title = f'Video {video_id}'
+            try:
+                resp = http_requests.get(
+                    f'https://www.youtube.com/watch?v={video_id}',
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+                    timeout=8
+                )
+                match = re.search(r'<title>(.*?)</title>', resp.text)
+                if match:
+                    raw = match.group(1).replace(' - YouTube', '').strip()
+                    if raw and raw.lower() != 'youtube':
+                        title = raw
+            except Exception:
+                pass
+            return [{
+                'id': video_id,
+                'title': title,
+                'url': f'https://www.youtube.com/watch?v={video_id}'
+            }], None
+    
+    # Method 1: Parse playlist page directly (no yt-dlp, works from servers)
+    if playlist_id:
+        print(f"  Fetching playlist {playlist_id} via web scraping...", file=sys.stderr)
+        videos, error = get_playlist_videos_api(playlist_id)
+        if videos:
+            print(f"  Found {len(videos)} videos via web scraping", file=sys.stderr)
+            return videos, None
+        print(f"  Web scraping failed: {error}", file=sys.stderr)
+    
+    # Method 2: Fall back to yt-dlp (works locally, may fail on servers)
+    try:
+        print(f"  Falling back to yt-dlp for playlist...", file=sys.stderr)
         cmd = [
             'yt-dlp',
             '--flat-playlist',
             '--dump-json',
-            '--playlist-end', '50',  # Limit to 50 videos
+            '--no-warnings',
+            '--playlist-end', '50',
             playlist_url
         ]
         
@@ -98,7 +291,8 @@ def get_playlist_videos(playlist_url):
         )
         
         if result.returncode != 0:
-            return None, f"Error fetching playlist: {result.stderr}"
+            error_msg = result.stderr or result.stdout or 'Unknown error'
+            return None, f"Could not fetch playlist. {error_msg[:300]}"
         
         videos = []
         for line in result.stdout.strip().split('\n'):
@@ -113,7 +307,9 @@ def get_playlist_videos(playlist_url):
                 except json.JSONDecodeError:
                     continue
         
-        return videos, None
+        if videos:
+            return videos, None
+        return None, "No videos found in playlist"
     except subprocess.TimeoutExpired:
         return None, "Request timed out"
     except Exception as e:
@@ -437,43 +633,32 @@ def extract_transcripts():
         transcripts = []
         skipped = []
         
-        # Process each video
+        # Process each video using youtube-transcript-api (no yt-dlp needed)
         for idx, video in enumerate(videos, 1):
             video_id = video['id']
             video_title = video['title']
-            video_url = video['url']
             
-            # Download subtitle
-            vtt_file, error = download_subtitle(video_id, video_url)
+            print(f"  [{idx}/{total_videos}] Fetching transcript for: {video_title}", file=sys.stderr)
             
-            if error or not vtt_file:
-                # Log the error for debugging
-                print(f"Video {idx}/{total_videos}: {video_title} - {error}", file=sys.stderr)
+            # Use youtube-transcript-api directly (works from servers!)
+            transcript_text, error = get_transcript_direct(video_id)
+            
+            if error or not transcript_text:
+                print(f"  [{idx}/{total_videos}] Skipped: {error}", file=sys.stderr)
                 skipped.append({
                     'title': video_title,
                     'reason': error or 'No captions available'
                 })
-                time.sleep(1)  # Rate limiting
+                time.sleep(0.5)  # Small delay
                 continue
             
-            # Extract and clean transcript
-            transcript_text = extract_spoken_words_only(vtt_file)
+            transcripts.append({
+                'title': video_title,
+                'text': transcript_text
+            })
+            print(f"  [{idx}/{total_videos}] ✓ Got transcript ({len(transcript_text)} chars)", file=sys.stderr)
             
-            if transcript_text and transcript_text != "[No clear speech detected]":
-                transcripts.append({
-                    'title': video_title,
-                    'text': transcript_text
-                })
-            
-            # Clean up temp file
-            try:
-                if os.path.exists(vtt_file):
-                    os.remove(vtt_file)
-            except:
-                pass
-            
-            # Rate limiting
-            time.sleep(1)
+            time.sleep(0.5)  # Rate limiting
         
         # Combine all transcripts
         combined_text = ""
@@ -527,49 +712,37 @@ def extract_transcripts_stream(playlist_url, job_id):
         update_progress(job_id, 0, total_videos, 'Processing videos', '')
         yield f"data: {json.dumps({'type': 'progress', 'current': 0, 'total': total_videos, 'percentage': 0, 'status': 'Starting...', 'video_title': ''})}\n\n"
         
-        # Process each video
+        # Process each video using youtube-transcript-api
         for idx, video in enumerate(videos, 1):
             video_id = video['id']
             video_title = video['title']
-            video_url = video['url']
             
             percentage = int((idx / total_videos) * 90)  # Reserve 10% for final processing
-            update_progress(job_id, idx, total_videos, 'Downloading subtitle', video_title)
-            yield f"data: {json.dumps({'type': 'progress', 'current': idx, 'total': total_videos, 'percentage': percentage, 'status': 'Downloading subtitle', 'video_title': video_title})}\n\n"
+            update_progress(job_id, idx, total_videos, 'Fetching transcript', video_title)
+            yield f"data: {json.dumps({'type': 'progress', 'current': idx, 'total': total_videos, 'percentage': percentage, 'status': 'Fetching transcript', 'video_title': video_title})}\n\n"
             
-            # Download subtitle
-            vtt_file, error = download_subtitle(video_id, video_url)
+            # Use youtube-transcript-api directly (works from servers!)
+            transcript_text, error = get_transcript_direct(video_id)
             
-            if error or not vtt_file:
+            if error or not transcript_text:
                 skipped.append({
                     'title': video_title,
                     'reason': error or 'No captions available'
                 })
-                update_progress(job_id, idx, total_videos, f'Skipped: {error[:50]}', video_title)
+                update_progress(job_id, idx, total_videos, f'Skipped: {error[:50] if error else "No captions"}', video_title)
                 skip_reason = error[:50] if error else "No captions"
                 yield f"data: {json.dumps({'type': 'progress', 'current': idx, 'total': total_videos, 'percentage': percentage, 'status': f'Skipped: {skip_reason}', 'video_title': video_title})}\n\n"
-                time.sleep(1)
+                time.sleep(0.5)
                 continue
             
-            # Extract and clean transcript
-            transcript_text = extract_spoken_words_only(vtt_file)
+            transcripts.append({
+                'title': video_title,
+                'text': transcript_text
+            })
+            update_progress(job_id, idx, total_videos, 'Extracted transcript', video_title)
+            yield f"data: {json.dumps({'type': 'progress', 'current': idx, 'total': total_videos, 'percentage': percentage, 'status': 'Extracted transcript', 'video_title': video_title})}\n\n"
             
-            if transcript_text and transcript_text != "[No clear speech detected]":
-                transcripts.append({
-                    'title': video_title,
-                    'text': transcript_text
-                })
-                update_progress(job_id, idx, total_videos, 'Extracted transcript', video_title)
-                yield f"data: {json.dumps({'type': 'progress', 'current': idx, 'total': total_videos, 'percentage': percentage, 'status': 'Extracted transcript', 'video_title': video_title})}\n\n"
-            
-            # Clean up temp file
-            try:
-                if os.path.exists(vtt_file):
-                    os.remove(vtt_file)
-            except:
-                pass
-            
-            time.sleep(1)
+            time.sleep(0.5)
         
         # Combine all transcripts
         yield f"data: {json.dumps({'type': 'status', 'message': 'Combining transcripts...', 'percentage': 95})}\n\n"

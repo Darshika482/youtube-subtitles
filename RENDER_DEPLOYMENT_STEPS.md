@@ -40,20 +40,15 @@ Python 3
 
 **Build Command:**
 ```
-pip install -r requirements.txt && curl -fsSL https://nodejs.org/dist/v20.11.0/node-v20.11.0-linux-x64.tar.xz -o /tmp/node.tar.xz && cd /tmp && tar -xf node.tar.xz && export PATH=$PATH:/tmp/node-v20.11.0-linux-x64/bin && node --version
+pip install -r requirements.txt
 ```
-
-**Start Command:**
-```
-export PATH=$PATH:/tmp/node-v20.11.0-linux-x64/bin:$PATH && gunicorn app:app --bind 0.0.0.0:$PORT --timeout 600 --workers 2
-```
-
-**⚠️ Note:** If Node.js installation fails, the app will still work but may skip some videos that require JavaScript runtime.
 
 **Start Command:**
 ```
 gunicorn app:app --bind 0.0.0.0:$PORT --timeout 600 --workers 2
 ```
+
+> ✅ **No Node.js needed!** Transcript extraction now uses `youtube-transcript-api` (pure Python, works everywhere).
 
 ### 4️⃣ Advanced Settings (Optional)
 - **Health Check Path:** `/health`
