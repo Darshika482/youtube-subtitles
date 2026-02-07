@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Tools - Transcript Extractor & Video Downloader</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Configure API base URL for static deployments (e.g. Vercel) -->
+    <script>
+        // IMPORTANT: When deploying frontend to Vercel separately from backend,
+        // update this URL to your deployed backend (e.g., Render, Railway, etc.)
+        // Example: 'https://your-backend.onrender.com'
+        // Leave empty ('') if frontend and backend are on the same domain
+        window.APP_CONFIG = {
+            API_BASE_URL: ''  // ← Update this with your backend URL when deploying to Vercel
+        };
+    </script>
+
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-lg-10">
+                <div class="card shadow-lg">
+                    <div class="card-header bg-primary text-white">
+                        <h1 class="h3 mb-0">🎬 YouTube Tools</h1>
+                        <p class="mb-0 small">Extract transcripts or download videos from YouTube</p>
+                    </div>
+                    <div class="card-body p-4">
+                        <!-- Tabs Navigation -->
+                        <ul class="nav nav-tabs mb-4" id="mainTabs" role="tablist">
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link active" id="transcript-tab" data-bs-toggle="tab" data-bs-target="#transcript-pane" type="button" role="tab">
+                                    📝 Transcript Extractor
+                                </button>
+                            </li>
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link" id="downloader-tab" data-bs-toggle="tab" data-bs-target="#downloader-pane" type="button" role="tab">
+                                    ⬇️ Video Downloader
+                                </button>
+                            </li>
+                        </ul>
+
+                        <!-- Tab Content -->
+                        <div class="tab-content" id="mainTabContent">
+                            <!-- Transcript Extractor Tab -->
+                            <div class="tab-pane fade show active" id="transcript-pane" role="tabpanel">
+                        <form id="extractForm">
+                            <div class="mb-4">
+                                <label for="playlistUrl" class="form-label fw-bold">Paste YouTube Playlist URL</label>
+                                <input 
+                                    type="url" 
+                                    class="form-control form-control-lg" 
+                                    id="playlistUrl" 
+                                    placeholder="https://www.youtube.com/playlist?list=..." 
+                                    required
+                                >
+                                <div class="form-text">Supports YouTube playlist URLs (max 50 videos)</div>
+                            </div>
+                            
+                            <button type="submit" class="btn btn-primary btn-lg w-100 mb-4" id="extractBtn">
+                                <span class="spinner-border spinner-border-sm d-none" id="loadingSpinner" role="status"></span>
+                                <span id="btnText">Extract All Transcripts → TXT</span>
+                            </button>
+                        </form>
+
+                        <!-- Progress Section -->
+                        <div id="progressSection" class="d-none mb-4">
+                            <div class="card bg-light">
+                                <div class="card-body">
+                                    <h5 class="card-title">Progress</h5>
+                                    <div class="progress mb-2" style="height: 25px;">
+                                        <div 
+                                            class="progress-bar progress-bar-striped progress-bar-animated" 
+                                            role="progressbar" 
+                                            id="progressBar"
+                                            style="width: 0%"
+                                        ></div>
+                                    </div>
+                                    <p class="mb-0" id="progressText">Initializing...</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Results Section -->
+                        <div id="resultsSection" class="d-none">
+                            <div class="alert alert-success" role="alert">
+                                <h5 class="alert-heading">✅ Extraction Complete!</h5>
+                                <p class="mb-0" id="resultsSummary"></p>
+                            </div>
+
+                            <!-- Preview Box -->
+                            <div class="card mb-4">
+                                <div class="card-header bg-secondary text-white">
+                                    <h5 class="mb-0">Preview (First 500 characters)</h5>
+                                </div>
+                                <div class="card-body">
+                                    <pre id="previewText" class="preview-box"></pre>
+                                </div>
+                            </div>
+
+                            <!-- Download Button -->
+                            <div class="d-grid gap-2">
+                                <a href="#" id="transcriptDownloadBtn" class="btn btn-success btn-lg">
+                                    📥 Download: <span id="downloadFilename">playlist_transcripts_clean.txt</span>
+                                </a>
+                            </div>
+
+                            <!-- Skipped Videos -->
+                            <div id="skippedSection" class="mt-4 d-none">
+                                <div class="card border-warning">
+                                    <div class="card-header bg-warning">
+                                        <h5 class="mb-0">⚠️ Skipped Videos</h5>
+                                    </div>
+                                    <div class="card-body">
+                                        <ul id="skippedList" class="list-group list-group-flush"></ul>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Error Section -->
+                        <div id="errorSection" class="d-none">
+                            <div class="alert alert-danger" role="alert">
+                                <h5 class="alert-heading">❌ Error</h5>
+                                <p id="errorMessage" class="mb-0"></p>
+                            </div>
+                        </div>
+                            </div>
+
+                            <!-- Video Downloader Tab -->
+                            <div class="tab-pane fade" id="downloader-pane" role="tabpanel">
+                                <form id="downloadForm" enctype="multipart/form-data">
+                                    <div class="mb-3">
+                                        <label for="videoUrl" class="form-label fw-bold">YouTube URL</label>
+                                        <div class="input-group">
+                                            <input 
+                                                type="url" 
+                                                class="form-control" 
+                                                id="videoUrl" 
+                                                placeholder="https://www.youtube.com/watch?v=... or playlist URL"
+                                                required
+                                            >
+                                            <button type="button" class="btn btn-outline-secondary" id="checkVideoBtn" title="Check if video is accessible">
+                                                🔍 Check
+                                            </button>
+                                        </div>
+                                        <div class="form-text">Single video or playlist URL</div>
+                                        <div id="videoCheckResult" class="mt-2"></div>
+                                    </div>
+
+                                    <div class="mb-3">
+                                        <label for="cookieFile" class="form-label fw-bold">Cookie File (Optional)</label>
+                                        <input 
+                                            type="file" 
+                                            class="form-control" 
+                                            id="cookieFile" 
+                                            accept=".txt"
+                                        >
+                                        <div class="form-text">
+                                            <strong>For public videos:</strong> No cookies needed! The app will try multiple methods automatically.
+                                            <br>
+                                            <strong>For member-only/restricted videos:</strong> Upload cookies.txt file (Netscape format) while logged in as a member.
+                                            <br>
+                                            <a href="https://chrome.google.com/webstore/detail/get-cookiestxt/bgaddhkoddajcdgocldbbfleckgcbcid" target="_blank">Chrome Extension</a> | 
+                                            <a href="https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/" target="_blank">Firefox Addon</a>
+                                            <br>
+                                            <small class="text-info">ℹ️ The app tries downloading without cookies first, then with cookies if provided.</small>
+                                        </div>
+                                    </div>
+
+                                    <div class="row mb-3">
+                                        <div class="col-md-6">
+                                            <label for="downloadType" class="form-label fw-bold">Download Type</label>
+                                            <select class="form-select" id="downloadType">
+                                                <option value="video">Video</option>
+                                                <option value="audio">Audio Only</option>
+                                                <option value="subtitle">Subtitles Only</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label for="quality" class="form-label fw-bold">Quality</label>
+                                            <select class="form-select" id="quality">
+                                                <option value="best">Best Available</option>
+                                                <option value="720p">720p (HD)</option>
+                                                <option value="480p">480p (SD)</option>
+                                                <option value="360p">360p</option>
+                                                <option value="worst">Worst</option>
+                                            </select>
+                                        </div>
+                                    </div>
+
+                                    <div class="row mb-3" id="playlistOptions" style="display: none;">
+                                        <div class="col-md-4">
+                                            <label for="playlistStart" class="form-label">Playlist Start</label>
+                                            <input type="number" class="form-control" id="playlistStart" min="1" placeholder="1">
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label for="playlistEnd" class="form-label">Playlist End</label>
+                                            <input type="number" class="form-control" id="playlistEnd" min="1" placeholder="50">
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label for="playlistItems" class="form-label">Specific Items</label>
+                                            <input type="text" class="form-control" id="playlistItems" placeholder="1,3,5-10">
+                                        </div>
+                                    </div>
+
+                                    <div class="mb-3">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="yesPlaylist" checked>
+                                            <label class="form-check-label" for="yesPlaylist">
+                                                Download as playlist (if URL is a playlist)
+                                            </label>
+                                        </div>
+                                    </div>
+
+                                    <button type="submit" class="btn btn-success btn-lg w-100 mb-3" id="downloadBtn">
+                                        <span class="spinner-border spinner-border-sm d-none" id="downloadSpinner" role="status"></span>
+                                        <span id="downloadBtnText">⬇️ Start Download</span>
+                                    </button>
+                                </form>
+
+                                <!-- Download Progress -->
+                                <div id="downloadProgressSection" class="d-none mb-4">
+                                    <div class="card bg-light">
+                                        <div class="card-body">
+                                            <h5 class="card-title">Download Progress</h5>
+                                            <div class="progress mb-2" style="height: 25px;">
+                                                <div 
+                                                    class="progress-bar progress-bar-striped progress-bar-animated" 
+                                                    role="progressbar" 
+                                                    id="downloadProgressBar"
+                                                    style="width: 0%"
+                                                ></div>
+                                            </div>
+                                            <p class="mb-0" id="downloadProgressText">Starting download...</p>
+                                            <pre id="downloadLog" class="mt-3 p-2 bg-dark text-light" style="max-height: 200px; overflow-y: auto; font-size: 0.85rem;"></pre>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Download Results -->
+                                <div id="downloadResultsSection" class="d-none">
+                                    <div class="alert alert-success" role="alert">
+                                        <h5 class="alert-heading">✅ Download Complete!</h5>
+                                        <p class="mb-0" id="downloadResultsSummary"></p>
+                                    </div>
+                                </div>
+
+                                <!-- Download Error -->
+                                <div id="downloadErrorSection" class="d-none">
+                                    <div class="alert alert-danger" role="alert">
+                                        <h5 class="alert-heading">❌ Download Error</h5>
+                                        <p id="downloadErrorMessage" class="mb-0"></p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Info Card -->
+                <div class="card mt-4">
+                    <div class="card-body">
+                        <h5 class="card-title">ℹ️ How it works</h5>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <h6>Transcript Extractor:</h6>
+                                <ul class="mb-0">
+                                    <li>Paste your YouTube playlist URL</li>
+                                    <li>The app extracts transcripts from all videos (up to 50)</li>
+                                    <li>Each transcript is cleaned to show only spoken words</li>
+                                    <li>Download the combined transcript as a TXT file</li>
+                                </ul>
+                            </div>
+                            <div class="col-md-6">
+                                <h6>Video Downloader:</h6>
+                                <ul class="mb-0">
+                                    <li>Paste video or playlist URL</li>
+                                    <li>Optionally upload cookies.txt for age-restricted content</li>
+                                    <li>Choose quality and download type</li>
+                                    <li>Videos are saved to the downloads folder</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/script.js"></script>
+</body>
+</html>
+
