@@ -76,13 +76,13 @@ export async function extractTranscripts(
   // If onProgress callback provided, use SSE for real-time updates
   if (onProgress) {
     const jobId = `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
+
     return new Promise((resolve, reject) => {
       // Use POST with SSE streaming
       fetch(`${API_BASE}/extract`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           playlist_url: playlistUrl,
           use_sse: true,
           job_id: jobId
@@ -109,7 +109,7 @@ export async function extractTranscripts(
           try {
             while (true) {
               const { done, value } = await reader.read();
-              
+
               if (done) break;
 
               buffer += decoder.decode(value, { stream: true });

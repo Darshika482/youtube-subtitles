@@ -121,55 +121,200 @@ def get_playlist_videos(playlist_url):
 
 
 def download_subtitle(video_id, video_url):
-    """Download subtitle for a single video using latest yt-dlp."""
+    """Download subtitle for a single video using multiple strategies."""
     temp_dir = app.config['UPLOAD_FOLDER']
+    # Ensure temp directory exists
+    os.makedirs(temp_dir, exist_ok=True)
     output_template = os.path.join(temp_dir, f'{video_id}.%(ext)s')
-
-    cmd = [
-        'yt-dlp',
-        '--skip-download',
-        '--write-sub',
-        '--write-auto-sub',
-        '--sub-lang', 'en',
-        '--convert-subs', 'vtt',
-        '-o', output_template,
-        video_url,
+    
+    # Multiple strategies to try
+    strategies = [
+        {
+            'name': 'web_client',
+            'cmd': [
+                'yt-dlp',
+                '--skip-download',
+                '--write-sub',
+                '--write-auto-sub',
+                '--sub-lang', 'en',
+                '--convert-subs', 'vtt',
+                '--extractor-args', 'youtube:player_client=web',
+                '--no-warnings',
+                '-o', output_template,
+                video_url,
+            ]
+        },
+        {
+            'name': 'android_client',
+            'cmd': [
+                'yt-dlp',
+                '--skip-download',
+                '--write-sub',
+                '--write-auto-sub',
+                '--sub-lang', 'en',
+                '--convert-subs', 'vtt',
+                '--extractor-args', 'youtube:player_client=android',
+                '--no-warnings',
+                '-o', output_template,
+                video_url,
+            ]
+        },
+        {
+            'name': 'ios_client',
+            'cmd': [
+                'yt-dlp',
+                '--skip-download',
+                '--write-sub',
+                '--write-auto-sub',
+                '--sub-lang', 'en',
+                '--convert-subs', 'vtt',
+                '--extractor-args', 'youtube:player_client=ios',
+                '--no-warnings',
+                '-o', output_template,
+                video_url,
+            ]
+        },
+        {
+            'name': 'default',
+            'cmd': [
+                'yt-dlp',
+                '--skip-download',
+                '--write-sub',
+                '--write-auto-sub',
+                '--sub-lang', 'en',
+                '--convert-subs', 'vtt',
+                '--no-warnings',
+                '-o', output_template,
+                video_url,
+            ]
+        }
     ]
-
+    
+    # Try browser cookies if available
     try:
-        print(f"  Downloading subs for {video_id}...", file=sys.stderr)
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=45,
-            shell=False,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
-        )
+        available_browsers = get_browser_cookies()
+        for browser in available_browsers[:2]:  # Limit to 2 browsers
+            strategies.insert(0, {
+                'name': f'browser_{browser}',
+                'cmd': [
+                    'yt-dlp',
+                    '--skip-download',
+                    '--write-sub',
+                    '--write-auto-sub',
+                    '--sub-lang', 'en',
+                    '--convert-subs', 'vtt',
+                    '--cookies-from-browser', browser,
+                    '--extractor-args', 'youtube:player_client=web',
+                    '--no-warnings',
+                    '-o', output_template,
+                    video_url,
+                ]
+            })
+    except:
+        pass  # Continue without browser cookies
+    
+    last_error = None
+    
+    for idx, strategy in enumerate(strategies):
+        # Small delay between strategies to avoid rate limiting (except first one)
+        if idx > 0:
+            time.sleep(0.5)
+        
+        try:
+            print(f"  Trying {strategy['name']} for {video_id}...", file=sys.stderr)
+            result = subprocess.run(
+                strategy['cmd'],
+                capture_output=True,
+                text=True,
+                timeout=45,
+                shell=False,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+            )
 
-        # Log full output for debugging
-        if result.stdout:
-            print(f"  STDOUT: {result.stdout[:300]}", file=sys.stderr)
-        if result.stderr:
-            print(f"  STDERR: {result.stderr[:300]}", file=sys.stderr)
+            # Check for VTT file with multiple patterns
+            # Wait a tiny bit for file system to sync
+            time.sleep(0.1)
+            
+            if os.path.exists(temp_dir):
+                # Pattern 1: video_id.vtt
+                # Pattern 2: video_id.en.vtt  
+                # Pattern 3: Any file starting with video_id and ending with .vtt
+                # Pattern 4: Files with video_id in the name (yt-dlp sometimes adds extra chars)
+                vtt_files = []
+                for file in os.listdir(temp_dir):
+                    if file.endswith('.vtt'):
+                        # Check if video_id is in the filename (before the .vtt extension)
+                        file_base = file[:-4]  # Remove .vtt
+                        if video_id in file_base or file.startswith(video_id):
+                            vtt_file = os.path.join(temp_dir, file)
+                            if os.path.exists(vtt_file):
+                                file_size = os.path.getsize(vtt_file)
+                                if file_size > 50:  # At least 50 bytes
+                                    vtt_files.append((vtt_file, file_size, file))
+                
+                if vtt_files:
+                    # Use the largest file (most complete)
+                    vtt_files.sort(key=lambda x: x[1], reverse=True)
+                    best_file, file_size, file_name = vtt_files[0]
+                    print(f"  ✓ Found subtitle: {file_name} ({file_size} bytes)", file=sys.stderr)
+                    return best_file, None
 
-        # Look for any VTT created for this video
-        for file in os.listdir(temp_dir):
-            if file.startswith(video_id) and file.endswith('.vtt'):
-                vtt_file = os.path.join(temp_dir, file)
-                if os.path.getsize(vtt_file) > 100:
-                    print(f"  Found subtitle: {file}", file=sys.stderr)
-                    return vtt_file, None
-
-        combined = (result.stdout or '') + (result.stderr or '')
-        if result.returncode != 0:
-            return None, f"yt-dlp error: {combined[:200]}"
-        return None, "No subtitle file created"
-
-    except subprocess.TimeoutExpired:
-        return None, "Timed out"
-    except Exception as e:
-        return None, str(e)
+            # If command failed, log error
+            if result.returncode != 0:
+                error_output = (result.stderr or '') + (result.stdout or '')
+                error_lower = error_output.lower()
+                
+                # Check for specific error types
+                if 'no subtitles' in error_lower or 'subtitles are not available' in error_lower or 'has no subtitles' in error_lower:
+                    last_error = "No subtitles available for this video"
+                    print(f"  ✗ {strategy['name']}: No subtitles available", file=sys.stderr)
+                    break  # No point trying other strategies
+                elif 'private' in error_lower or 'unavailable' in error_lower or 'video unavailable' in error_lower:
+                    last_error = "Video is private or unavailable"
+                    print(f"  ✗ {strategy['name']}: Video unavailable", file=sys.stderr)
+                    break  # No point trying other strategies
+                elif 'sign in' in error_lower or 'members only' in error_lower or 'member-only' in error_lower:
+                    last_error = "Video requires sign-in or membership"
+                    print(f"  ✗ {strategy['name']}: Requires authentication", file=sys.stderr)
+                    continue  # Try browser cookies if available
+                elif 'rate limit' in error_lower or '429' in error_output:
+                    last_error = "Rate limited by YouTube, please wait"
+                    print(f"  ✗ {strategy['name']}: Rate limited", file=sys.stderr)
+                    time.sleep(2)  # Wait a bit before next strategy
+                    continue
+                else:
+                    # Try next strategy
+                    error_msg = error_output[:200] if error_output else "Unknown error"
+                    print(f"  ✗ {strategy['name']} failed: {error_msg}", file=sys.stderr)
+                    if not last_error or ('no subtitles' not in last_error.lower() and 'unavailable' not in last_error.lower()):
+                        last_error = f"Error: {error_msg[:100]}"
+                    continue
+            else:
+                # Command succeeded but no file found - might be rate limited or truly no subtitles
+                error_output = (result.stderr or '') + (result.stdout or '')
+                if 'no subtitles' in error_output.lower() or 'subtitles are not available' in error_output.lower():
+                    last_error = "No subtitles available for this video"
+                    break  # No point trying other strategies
+                else:
+                    # Command succeeded but no file - might be a timing issue, try next strategy
+                    print(f"  ⚠ {strategy['name']} succeeded but no VTT file found", file=sys.stderr)
+                    if not last_error:
+                        last_error = "Command succeeded but no subtitle file created"
+                    continue
+                    
+        except subprocess.TimeoutExpired:
+            print(f"  ✗ {strategy['name']} timed out", file=sys.stderr)
+            if not last_error:
+                last_error = f"{strategy['name']}: Timeout"
+            continue
+        except Exception as e:
+            print(f"  ✗ {strategy['name']} exception: {str(e)}", file=sys.stderr)
+            if not last_error:
+                last_error = f"{strategy['name']}: {str(e)}"
+            continue
+    
+    # All strategies failed
+    return None, last_error or "All subtitle download strategies failed. Video may not have subtitles available."
 
 
 @app.route('/')
